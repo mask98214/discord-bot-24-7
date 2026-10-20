@@ -1,14 +1,15 @@
 import os
 import sys
-import asyncio
-import datetime
 import random
+import asyncio
 import logging
 import threading
+import datetime
+from typing import Optional
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
 import discord
-from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 
 # --- سجلات التشغيل ---
@@ -33,11 +34,25 @@ threading.Thread(target=run_web_server, daemon=True).start()
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+# أوامر Slash لا تحتاج صلاحية قراءة محتوى الرسائل
 intents = discord.Intents.default()
-intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+class RailwayBot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        # مزامنة أوامر / مع ديسكورد (قد تستغرق حتى ساعة للظهور عالميًا)
+        await self.tree.sync()
+        log.info("تمت مزامنة أوامر Slash")
+
+
+bot = RailwayBot()
+tree = bot.tree
+
+NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
 EIGHT_BALL_ANSWERS = [
     "نعم بالتأكيد ✅",
     "الأمر غير واضح، حاول مرة أخرى 🤔",
@@ -48,30 +63,31 @@ EIGHT_BALL_ANSWERS = [
     "الإجابة لا 🙅",
     "ربما 🎲",
 ]
+reminder_tasks = set()
 
 COMMAND_GROUPS = [
     ("🛠️ عام", [
-        ("!help", "عرض هذه القائمة"),
-        ("!ping", "عرض زمن استجابة البوت"),
-        ("!botinfo", "معلومات عن البوت"),
-        ("!serverinfo", "معلومات عن السيرفر"),
-        ("!userinfo [عضو]", "معلومات عن العضو"),
-        ("!avatar [عضو]", "عرض صورة العضو الشخصية"),
+        ("/help", "عرض هذه القائمة"),
+        ("/ping", "عرض زمن استجابة البوت"),
+        ("/botinfo", "معلومات عن البوت"),
+        ("/serverinfo", "معلومات عن السيرفر"),
+        ("/userinfo [عضو]", "معلومات عن العضو"),
+        ("/avatar [مستخدم]", "عرض الصورة الشخصية"),
     ]),
     ("🎮 ترفيه وأدوات", [
-        ("!say <نص>", "إعادة النص وحذف رسالتك"),
-        ("!coinflip", "رمي عملة (صورة أو كتابة)"),
-        ("!roll [عدد الأوجه]", "رمي نرد (افتراضي 6)"),
-        ("!8ball <سؤال>", "اسأل الكرة السحرية"),
-        ("!choose <خيار> | <خيار>", "اختيار عشوائي بين الخيارات"),
-        ("!poll <سؤال> | <خيار> | <خيار>", "إنشاء تصويت بالتفاعلات"),
-        ("!remind <ثواني> <نص>", "تذكير بعد مدة (حتى يوم)"),
+        ("/say <نص>", "يرسل البوت النص"),
+        ("/coinflip", "رمي عملة (صورة أو كتابة)"),
+        ("/roll [عدد الأوجه]", "رمي نرد (افتراضي 6)"),
+        ("/8ball <سؤال>", "اسأل الكرة السحرية"),
+        ("/choose <خيار> | <خيار>", "اختيار عشوائي بين الخيارات"),
+        ("/poll <سؤال> <خيار1> <خيار2>", "تصويت بالتفاعلات (حتى 5 خيارات)"),
+        ("/remind <ثواني> <نص>", "تذكير بعد مدة (حتى يوم)"),
     ]),
     ("🛡️ إدارة", [
-        ("!clear <عدد>", "حذف رسائل (إدارة الرسائل)"),
-        ("!kick <عضو> [سبب]", "طرد عضو (صلاحية الطرد)"),
-        ("!ban <عضو> [سبب]", "حظر عضو (صلاحية الحظر)"),
-        ("!timeout <عضو> <دقائق> [سبب]", "إسكات عضو مؤقتًا"),
+        ("/clear <عدد>", "حذف رسائل (إدارة الرسائل)"),
+        ("/kick <عضو> [سبب]", "طرد عضو (صلاحية الطرد)"),
+        ("/ban <عضو> [سبب]", "حظر عضو (صلاحية الحظر)"),
+        ("/timeout <عضو> <دقائق> [سبب]", "إسكات عضو مؤقتًا"),
     ]),
 ]
 
@@ -85,13 +101,15 @@ async def on_ready():
     print(f"discord.py : {discord.__version__}")
     print("=" * 40)
     await bot.change_presence(
-        activity=discord.Activity(type=discord.ActivityType.watching, name="!help")
+        activity=discord.Activity(type=discord.ActivityType.watching, name="/help")
     )
     log.info("تم تسجيل الدخول بنجاح باسم: %s", bot.user.name)
 
 
-@bot.command(name="help")
-async def help_command(ctx):
+# ===== عام =====
+@tree.command(name="help", description="عرض قائمة الأوامر")
+async def help_cmd(interaction: discord.Interaction):
+    total = sum(len(cmds) for _, cmds in COMMAND_GROUPS)
     embed = discord.Embed(title="📖 قائمة الأوامر", color=discord.Color.blurple())
     for title, cmds in COMMAND_GROUPS:
         embed.add_field(
@@ -99,213 +117,253 @@ async def help_command(ctx):
             value="\n".join(f"`{cmd}` — {desc}" for cmd, desc in cmds),
             inline=False,
         )
-    embed.set_footer(text=f"طلب بواسطة {ctx.author} • إجمالي الأوامر: {sum(len(c) for _, c in COMMAND_GROUPS)}")
-    await ctx.send(embed=embed)
+    embed.set_footer(text=f"إجمالي الأوامر: {total}")
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="ping")
-async def ping(ctx):
+@tree.command(name="ping", description="عرض زمن استجابة البوت")
+async def ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)
     embed = discord.Embed(
         title="🏓 Pong!",
         description=f"البوت يعمل — زمن الاستجابة: **{latency} ms**",
         color=discord.Color.green(),
     )
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="say")
-async def say(ctx, *, text: str):
-    try:
-        await ctx.message.delete()
-    except discord.HTTPException:
-        pass
-    await ctx.send(text[:1900])
+@tree.command(name="botinfo", description="معلومات عن البوت")
+async def botinfo(interaction: discord.Interaction):
+    embed = discord.Embed(title="🤖 معلومات البوت", color=discord.Color.blurple())
+    embed.add_field(name="الاسم", value=bot.user.name, inline=True)
+    embed.add_field(name="السيرفرات", value=str(len(bot.guilds)), inline=True)
+    embed.add_field(name="زمن الاستجابة", value=f"{round(bot.latency * 1000)} ms", inline=True)
+    embed.add_field(name="discord.py", value=discord.__version__, inline=True)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="coinflip")
-@commands.cooldown(1, 5, commands.BucketType.user)
-async def coinflip(ctx):
-    result = random.choice(["صورة 🪙", "كتابة 🪙"])
-    await ctx.send(f"النتيجة: **{result}**")
-
-
-@bot.command(name="roll")
-@commands.cooldown(1, 5, commands.BucketType.user)
-async def roll(ctx, sides: int = 6):
-    if not 2 <= sides <= 1000:
-        await ctx.send("⚠️ عدد الأوجه يجب أن يكون بين 2 و 1000.")
-        return
-    await ctx.send(f"🎲 رميت نردًا من {sides} أوجه: **{random.randint(1, sides)}**")
-
-
-@bot.command(name="8ball")
-@commands.cooldown(1, 5, commands.BucketType.user)
-async def eight_ball(ctx, *, question: str):
-    await ctx.send(f"🎱 **السؤال:** {question}\n**الجواب:** {random.choice(EIGHT_BALL_ANSWERS)}")
-
-
-@bot.command(name="avatar")
-async def avatar(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    embed = discord.Embed(title=f"صورة {member.display_name}", color=discord.Color.blurple())
-    embed.set_image(url=member.display_avatar.url)
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="userinfo")
-async def userinfo(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    embed = discord.Embed(
-        title=f"👤 {member}",
-        color=member.color if member.color.value else discord.Color.blurple(),
-    )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="ID", value=str(member.id), inline=False)
-    embed.add_field(name="انضم للسيرفر", value=discord.utils.format_dt(member.joined_at, "D") if member.joined_at else "غير معروف", inline=True)
-    embed.add_field(name="تاريخ إنشاء الحساب", value=discord.utils.format_dt(member.created_at, "D"), inline=True)
-    embed.add_field(name="أعلى رتبة", value=member.top_role.mention, inline=True)
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="serverinfo")
-@commands.guild_only()
-async def serverinfo(ctx):
-    guild = ctx.guild
+@tree.command(name="serverinfo", description="معلومات عن السيرفر")
+@app_commands.guild_only()
+async def serverinfo(interaction: discord.Interaction):
+    guild = interaction.guild
     embed = discord.Embed(title=f"🏠 {guild.name}", color=discord.Color.blurple())
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
     embed.add_field(name="المالك", value=str(guild.owner), inline=True)
     embed.add_field(name="عدد الأعضاء", value=str(guild.member_count), inline=True)
     embed.add_field(name="تاريخ الإنشاء", value=discord.utils.format_dt(guild.created_at, "D"), inline=False)
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
 
-@bot.command(name="clear")
-@commands.has_permissions(manage_messages=True)
-@commands.guild_only()
-async def clear(ctx, amount: int):
-    if not 1 <= amount <= 100:
-        await ctx.send("⚠️ العدد يجب أن يكون بين 1 و 100.")
+@tree.command(name="userinfo", description="معلومات عن عضو")
+@app_commands.guild_only()
+@app_commands.describe(member="العضو المراد معرفة معلوماته")
+async def userinfo(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    member = member or interaction.user
+    embed = discord.Embed(
+        title=f"👤 {member}",
+        color=member.color if member.color.value else discord.Color.blurple(),
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="ID", value=str(member.id), inline=False)
+    joined = discord.utils.format_dt(member.joined_at, "D") if member.joined_at else "غير معروف"
+    embed.add_field(name="انضم للسيرفر", value=joined, inline=True)
+    embed.add_field(name="تاريخ إنشاء الحساب", value=discord.utils.format_dt(member.created_at, "D"), inline=True)
+    embed.add_field(name="أعلى رتبة", value=member.top_role.mention, inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="avatar", description="عرض الصورة الشخصية لمستخدم")
+@app_commands.describe(user="المستخدم المراد عرض صورته")
+async def avatar(interaction: discord.Interaction, user: Optional[discord.User] = None):
+    user = user or interaction.user
+    embed = discord.Embed(title=f"صورة {user.display_name}", color=discord.Color.blurple())
+    embed.set_image(url=user.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+
+# ===== ترفيه وأدوات =====
+@tree.command(name="say", description="يرسل البوت النص الذي تكتبه")
+@app_commands.describe(text="النص المراد إرساله")
+async def say(interaction: discord.Interaction, text: app_commands.Range[str, 1, 1900]):
+    await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
+
+
+@tree.command(name="coinflip", description="رمي عملة")
+@app_commands.checks.cooldown(1, 5, key=lambda i: i.user.id)
+async def coinflip(interaction: discord.Interaction):
+    result = random.choice(["صورة 🪙", "كتابة 🪙"])
+    await interaction.response.send_message(f"النتيجة: **{result}**")
+
+
+@tree.command(name="roll", description="رمي نرد")
+@app_commands.describe(sides="عدد أوجه النرد (2 - 1000)")
+@app_commands.checks.cooldown(1, 5, key=lambda i: i.user.id)
+async def roll(interaction: discord.Interaction, sides: app_commands.Range[int, 2, 1000] = 6):
+    await interaction.response.send_message(
+        f"🎲 رميت نردًا من {sides} أوجه: **{random.randint(1, sides)}**"
+    )
+
+
+@tree.command(name="8ball", description="اسأل الكرة السحرية")
+@app_commands.describe(question="سؤالك")
+@app_commands.checks.cooldown(1, 5, key=lambda i: i.user.id)
+async def eight_ball(interaction: discord.Interaction, question: str):
+    await interaction.response.send_message(
+        f"🎱 **السؤال:** {question}\n**الجواب:** {random.choice(EIGHT_BALL_ANSWERS)}"
+    )
+
+
+@tree.command(name="choose", description="اختيار عشوائي بين عدة خيارات")
+@app_commands.describe(options="الخيارات مفصولة بـ | مثال: pizza | burger | sushi")
+@app_commands.checks.cooldown(1, 5, key=lambda i: i.user.id)
+async def choose(interaction: discord.Interaction, options: str):
+    items = [o.strip() for o in options.split("|") if o.strip()]
+    if len(items) < 2:
+        await interaction.response.send_message("⚠️ أدخل خيارين على الأقل مفصولين بـ |.", ephemeral=True)
         return
-    deleted = await ctx.channel.purge(limit=amount + 1)
-    await ctx.send(f"🧹 تم حذف {len(deleted) - 1} رسالة.", delete_after=5)
+    await interaction.response.send_message(f"🤖 اخترت لك: **{random.choice(items)}**")
 
 
-# ===== أوامر الإدارة =====
-@bot.command(name="kick")
-@commands.has_permissions(kick_members=True)
-@commands.bot_has_permissions(kick_members=True)
-@commands.guild_only()
-async def kick(ctx, member: discord.Member, *, reason: str = "بدون سبب"):
-    if member.top_role >= ctx.author.top_role and ctx.guild.owner_id != ctx.author.id:
-        await ctx.send("⛔ لا يمكنك طرد عضو رتبته أعلى من رتبتك أو مساوية لها.")
-        return
-    await member.kick(reason=f"{ctx.author}: {reason}")
-    await ctx.send(f"👢 تم طرد {member} — السبب: {reason}")
-
-
-@bot.command(name="ban")
-@commands.has_permissions(ban_members=True)
-@commands.bot_has_permissions(ban_members=True)
-@commands.guild_only()
-async def ban(ctx, member: discord.Member, *, reason: str = "بدون سبب"):
-    if member.top_role >= ctx.author.top_role and ctx.guild.owner_id != ctx.author.id:
-        await ctx.send("⛔ لا يمكنك حظر عضو رتبته أعلى من رتبتك أو مساوية لها.")
-        return
-    await member.ban(reason=f"{ctx.author}: {reason}", delete_message_seconds=0)
-    await ctx.send(f"🔨 تم حظر {member} — السبب: {reason}")
-
-
-@bot.command(name="timeout")
-@commands.has_permissions(moderate_members=True)
-@commands.bot_has_permissions(moderate_members=True)
-@commands.guild_only()
-async def timeout(ctx, member: discord.Member, minutes: int, *, reason: str = "بدون سبب"):
-    if not 1 <= minutes <= 40320:  # حد ديسكورد: 28 يومًا
-        await ctx.send("⚠️ المدة يجب أن تكون بين 1 و 40320 دقيقة (28 يومًا).")
-        return
-    until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
-    await member.timeout(until, reason=f"{ctx.author}: {reason}")
-    await ctx.send(f"🔇 تم إسكات {member} لمدة {minutes} دقيقة — السبب: {reason}")
-
-
-# ===== أوامر مساعدة وترفيه =====
-NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-
-
-@bot.command(name="poll")
-@commands.cooldown(1, 10, commands.BucketType.user)
-async def poll(ctx, *, text: str):
-    # الصيغة: !poll السؤال | خيار1 | خيار2 ...
-    parts = [p.strip() for p in text.split("|") if p.strip()]
-    if len(parts) < 3 or len(parts) - 1 > 10:
-        await ctx.send("⚠️ الصيغة: `!poll السؤال | خيار1 | خيار2` (من 2 إلى 10 خيارات).")
-        return
-    question, options = parts[0], parts[1:]
+@tree.command(name="poll", description="إنشاء تصويت بالتفاعلات")
+@app_commands.describe(
+    question="السؤال",
+    option1="الخيار الأول",
+    option2="الخيار الثاني",
+    option3="الخيار الثالث (اختياري)",
+    option4="الخيار الرابع (اختياري)",
+    option5="الخيار الخامس (اختياري)",
+)
+async def poll(
+    interaction: discord.Interaction,
+    question: str,
+    option1: str,
+    option2: str,
+    option3: Optional[str] = None,
+    option4: Optional[str] = None,
+    option5: Optional[str] = None,
+):
+    options = [o for o in (option1, option2, option3, option4, option5) if o]
     embed = discord.Embed(title=f"📊 {question}", color=discord.Color.orange())
     embed.description = "\n".join(f"{NUMBER_EMOJIS[i]} {opt}" for i, opt in enumerate(options))
-    msg = await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
+    msg = await interaction.original_response()
     for i in range(len(options)):
         await msg.add_reaction(NUMBER_EMOJIS[i])
 
 
-@bot.command(name="choose")
-@commands.cooldown(1, 5, commands.BucketType.user)
-async def choose(ctx, *, text: str):
-    # الصيغة: !choose خيار1 | خيار2 | خيار3
-    options = [p.strip() for p in text.split("|") if p.strip()]
-    if len(options) < 2:
-        await ctx.send("⚠️ الصيغة: `!choose خيار1 | خيار2` (خياران على الأقل).")
-        return
-    await ctx.send(f"🤖 اخترت لك: **{random.choice(options)}**")
-
-
-@bot.command(name="remind")
-async def remind(ctx, seconds: int, *, text: str):
-    if not 1 <= seconds <= 86400:
-        await ctx.send("⚠️ المدة يجب أن تكون بين 1 و 86400 ثانية (يوم).")
-        return
-    await ctx.send(f"⏰ سأذكّرك بعد {seconds} ثانية.")
+@tree.command(name="remind", description="تذكير بعد مدة")
+@app_commands.describe(seconds="المدة بالثواني (1 - 86400)", text="نص التذكير")
+async def remind(
+    interaction: discord.Interaction,
+    seconds: app_commands.Range[int, 1, 86400],
+    text: str,
+):
+    await interaction.response.send_message(f"⏰ سأذكّرك بعد {seconds} ثانية.", ephemeral=True)
 
     async def _reminder():
         await asyncio.sleep(seconds)
         try:
-            await ctx.send(f"{ctx.author.mention} ⏰ تذكير: {text}")
+            await interaction.channel.send(f"{interaction.user.mention} ⏰ تذكير: {text}")
         except discord.HTTPException:
-            log.warning("Failed to send reminder to %s", ctx.author)
+            log.warning("فشل إرسال التذكير إلى %s", interaction.user)
 
-    bot.loop.create_task(_reminder())
-
-
-@bot.command(name="botinfo")
-async def botinfo(ctx):
-    embed = discord.Embed(title="🤖 معلومات البوت", color=discord.Color.blurple())
-    embed.add_field(name="الاسم", value=bot.user.name, inline=True)
-    embed.add_field(name="السيرفرات", value=str(len(bot.guilds)), inline=True)
-    embed.add_field(name="زمن الاستجابة", value=f"{round(bot.latency * 1000)} ms", inline=True)
-    embed.add_field(name="discord.py", value=discord.__version__, inline=True)
-    await ctx.send(embed=embed)
+    task = asyncio.create_task(_reminder())
+    reminder_tasks.add(task)
+    task.add_done_callback(reminder_tasks.discard)
 
 
+# ===== إدارة =====
+@tree.command(name="clear", description="حذف عدد من الرسائل في القناة")
+@app_commands.describe(amount="عدد الرسائل (1 - 100)")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.checks.has_permissions(manage_messages=True)
+@app_commands.checks.bot_has_permissions(manage_messages=True)
+async def clear(interaction: discord.Interaction, amount: app_commands.Range[int, 1, 100]):
+    await interaction.response.defer(ephemeral=True)
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.followup.send(f"🧹 تم حذف {len(deleted)} رسالة.", ephemeral=True)
 
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
+
+def _is_outranked(interaction: discord.Interaction, member: discord.Member) -> bool:
+    # يمنع تنفيذ الإجراء على عضو رتبته أعلى أو مساوية (إلا لمالك السيرفر)
+    return (
+        member.top_role >= interaction.user.top_role
+        and interaction.guild.owner_id != interaction.user.id
+    )
+
+
+@tree.command(name="kick", description="طرد عضو من السيرفر")
+@app_commands.describe(member="العضو", reason="السبب (اختياري)")
+@app_commands.guild_only()
+@app_commands.default_permissions(kick_members=True)
+@app_commands.checks.has_permissions(kick_members=True)
+@app_commands.checks.bot_has_permissions(kick_members=True)
+async def kick(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
+    reason = reason or "بدون سبب"
+    if _is_outranked(interaction, member):
+        await interaction.response.send_message("⛔ لا يمكنك طرد عضو رتبته أعلى منك أو مساوية لها.", ephemeral=True)
         return
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("⛔ ليست لديك صلاحية لاستخدام هذا الأمر.")
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"⚠️ ناقص معامل: `{error.param.name}`. اكتب `!help` لمعرفة الاستخدام.")
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send("⚠️ قيمة غير صالحة للمعامل. تحقق من الأمر وحاول مرة أخرى.")
-    elif isinstance(error, commands.CommandOnCooldown):
-        await ctx.send(f"⏳ انتظر {error.retry_after:.1f} ثانية قبل استخدام الأمر مرة أخرى.")
-    elif isinstance(error, commands.NoPrivateMessage):
-        await ctx.send("⚠️ هذا الأمر يعمل داخل السيرفرات فقط.")
+    await member.kick(reason=f"{interaction.user}: {reason}")
+    await interaction.response.send_message(f"👢 تم طرد {member} — السبب: {reason}")
+
+
+@tree.command(name="ban", description="حظر عضو من السيرفر")
+@app_commands.describe(member="العضو", reason="السبب (اختياري)")
+@app_commands.guild_only()
+@app_commands.default_permissions(ban_members=True)
+@app_commands.checks.has_permissions(ban_members=True)
+@app_commands.checks.bot_has_permissions(ban_members=True)
+async def ban(interaction: discord.Interaction, member: discord.Member, reason: Optional[str] = None):
+    reason = reason or "بدون سبب"
+    if _is_outranked(interaction, member):
+        await interaction.response.send_message("⛔ لا يمكنك حظر عضو رتبته أعلى منك أو مساوية لها.", ephemeral=True)
+        return
+    await member.ban(reason=f"{interaction.user}: {reason}", delete_message_seconds=0)
+    await interaction.response.send_message(f"🔨 تم حظر {member} — السبب: {reason}")
+
+
+@tree.command(name="timeout", description="إسكات عضو مؤقتًا")
+@app_commands.describe(member="العضو", minutes="المدة بالدقائق (1 - 40320)", reason="السبب (اختياري)")
+@app_commands.guild_only()
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.checks.has_permissions(moderate_members=True)
+@app_commands.checks.bot_has_permissions(moderate_members=True)
+async def timeout(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    minutes: app_commands.Range[int, 1, 40320],
+    reason: Optional[str] = None,
+):
+    reason = reason or "بدون سبب"
+    if _is_outranked(interaction, member):
+        await interaction.response.send_message("⛔ لا يمكنك إسكات عضو رتبته أعلى منك أو مساوية لها.", ephemeral=True)
+        return
+    until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
+    await member.timeout(until, reason=f"{interaction.user}: {reason}")
+    await interaction.response.send_message(f"🔇 تم إسكات {member} لمدة {minutes} دقيقة — السبب: {reason}")
+
+
+@tree.error
+async def on_app_command_error_handler(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = "⛔ ليست لديك صلاحية لاستخدام هذا الأمر."
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        msg = "⛔ البوت يحتاج صلاحيات إضافية لتنفيذ هذا الأمر."
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        msg = f"⏳ انتظر {error.retry_after:.1f} ثانية قبل استخدام الأمر مرة أخرى."
+    elif isinstance(error, app_commands.NoPrivateMessage):
+        msg = "⚠️ هذا الأمر يعمل داخل السيرفرات فقط."
+    elif isinstance(error, app_commands.CheckFailure):
+        msg = "⛔ لا تملك صلاحية لهذا الأمر."
     else:
-        log.error("Unhandled command error in %s", ctx.command, exc_info=error)
-        await ctx.send("❌ حدث خطأ غير متوقع أثناء تنفيذ الأمر.")
+        log.error("Unhandled app command error in %s", interaction.command, exc_info=error)
+        msg = "❌ حدث خطأ غير متوقع أثناء تنفيذ الأمر."
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 if __name__ == "__main__":
@@ -313,4 +371,3 @@ if __name__ == "__main__":
         print("خطأ: يرجى وضع التوكن (DISCORD_TOKEN).")
         sys.exit(1)
     bot.run(TOKEN)
-
