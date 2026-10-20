@@ -44,9 +44,15 @@ class RailwayBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        # مزامنة أوامر / مع ديسكورد (قد تستغرق حتى ساعة للظهور عالميًا)
+        # الأوامر تُسجَّل على مستوى كل سيرفر (تظهر فورًا عند كتابة /)
+        # بدلًا من المزامنة العامة (قد تستغرق حتى ساعة).
+        # نحذف أي أوامر عامة قديمة حتى لا تظهر مكررة، ثم نعيد إضافة الأوامر محليًا.
+        commands_list = list(self.tree.get_commands())
+        self.tree.clear_commands(guild=None)
         await self.tree.sync()
-        log.info("تمت مزامنة أوامر Slash")
+        for cmd in commands_list:
+            self.tree.add_command(cmd)
+        log.info("تم حذف الأوامر العامة القديمة (إن وجدت)")
 
 
 bot = RailwayBot()
@@ -92,6 +98,18 @@ COMMAND_GROUPS = [
 ]
 
 
+async def sync_guild_commands(guild: discord.Object):
+    # نسخ الأوامر إلى السيرفر ومزامنتها فورًا
+    bot.tree.copy_global_to(guild=guild)
+    synced = await bot.tree.sync(guild=guild)
+    log.info("تمت مزامنة %d أمر في السيرفر: %s", len(synced), guild.name)
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    await sync_guild_commands(guild)
+
+
 @bot.event
 async def on_ready():
     print("=" * 40)
@@ -104,6 +122,8 @@ async def on_ready():
         activity=discord.Activity(type=discord.ActivityType.watching, name="/help")
     )
     log.info("تم تسجيل الدخول بنجاح باسم: %s", bot.user.name)
+    for guild in bot.guilds:
+        await sync_guild_commands(guild)
 
 
 # ===== عام =====
