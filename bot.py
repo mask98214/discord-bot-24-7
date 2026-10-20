@@ -1,5 +1,7 @@
 import os
 import sys
+import asyncio
+import datetime
 import random
 import logging
 import threading
@@ -58,6 +60,13 @@ COMMANDS_INFO = [
     ("!userinfo [عضو]", "معلومات عن العضو"),
     ("!serverinfo", "معلومات عن السيرفر"),
     ("!clear <عدد>", "حذف رسائل (يتطلب صلاحية إدارة الرسائل)"),
+    ("!kick <عضو> [سبب]", "طرد عضو (يتطلب صلاحية الطرد)"),
+    ("!ban <عضو> [سبب]", "حظر عضو (يتطلب صلاحية الحظر)"),
+    ("!timeout <عضو> <دقائق> [سبب]", "إسكات عضو مؤقتًا"),
+    ("!poll <سؤال> | <خيار> | <خيار>", "إنشاء تصويت بالتفاعلات"),
+    ("!choose <خيار> | <خيار>", "اختيار عشوائي بين الخيارات"),
+    ("!remind <ثواني> <نص>", "تذكير بعد مدة (حتى يوم)"),
+    ("!botinfo", "معلومات عن البوت"),
 ]
 
 
@@ -173,6 +182,103 @@ async def clear(ctx, amount: int):
         return
     deleted = await ctx.channel.purge(limit=amount + 1)
     await ctx.send(f"🧹 تم حذف {len(deleted) - 1} رسالة.", delete_after=5)
+
+
+# ===== أوامر الإدارة =====
+@bot.command(name="kick")
+@commands.has_permissions(kick_members=True)
+@commands.bot_has_permissions(kick_members=True)
+@commands.guild_only()
+async def kick(ctx, member: discord.Member, *, reason: str = "بدون سبب"):
+    if member.top_role >= ctx.author.top_role and ctx.guild.owner_id != ctx.author.id:
+        await ctx.send("⛔ لا يمكنك طرد عضو رتبته أعلى من رتبتك أو مساوية لها.")
+        return
+    await member.kick(reason=f"{ctx.author}: {reason}")
+    await ctx.send(f"👢 تم طرد {member} — السبب: {reason}")
+
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+@commands.bot_has_permissions(ban_members=True)
+@commands.guild_only()
+async def ban(ctx, member: discord.Member, *, reason: str = "بدون سبب"):
+    if member.top_role >= ctx.author.top_role and ctx.guild.owner_id != ctx.author.id:
+        await ctx.send("⛔ لا يمكنك حظر عضو رتبته أعلى من رتبتك أو مساوية لها.")
+        return
+    await member.ban(reason=f"{ctx.author}: {reason}", delete_message_seconds=0)
+    await ctx.send(f"🔨 تم حظر {member} — السبب: {reason}")
+
+
+@bot.command(name="timeout")
+@commands.has_permissions(moderate_members=True)
+@commands.bot_has_permissions(moderate_members=True)
+@commands.guild_only()
+async def timeout(ctx, member: discord.Member, minutes: int, *, reason: str = "بدون سبب"):
+    if not 1 <= minutes <= 40320:  # حد ديسكورد: 28 يومًا
+        await ctx.send("⚠️ المدة يجب أن تكون بين 1 و 40320 دقيقة (28 يومًا).")
+        return
+    until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
+    await member.timeout(until, reason=f"{ctx.author}: {reason}")
+    await ctx.send(f"🔇 تم إسكات {member} لمدة {minutes} دقيقة — السبب: {reason}")
+
+
+# ===== أوامر مساعدة وترفيه =====
+NUMBER_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+
+@bot.command(name="poll")
+@commands.cooldown(1, 10, commands.BucketType.user)
+async def poll(ctx, *, text: str):
+    # الصيغة: !poll السؤال | خيار1 | خيار2 ...
+    parts = [p.strip() for p in text.split("|") if p.strip()]
+    if len(parts) < 3 or len(parts) - 1 > 10:
+        await ctx.send("⚠️ الصيغة: `!poll السؤال | خيار1 | خيار2` (من 2 إلى 10 خيارات).")
+        return
+    question, options = parts[0], parts[1:]
+    embed = discord.Embed(title=f"📊 {question}", color=discord.Color.orange())
+    embed.description = "\n".join(f"{NUMBER_EMOJIS[i]} {opt}" for i, opt in enumerate(options))
+    msg = await ctx.send(embed=embed)
+    for i in range(len(options)):
+        await msg.add_reaction(NUMBER_EMOJIS[i])
+
+
+@bot.command(name="choose")
+@commands.cooldown(1, 5, commands.BucketType.user)
+async def choose(ctx, *, text: str):
+    # الصيغة: !choose خيار1 | خيار2 | خيار3
+    options = [p.strip() for p in text.split("|") if p.strip()]
+    if len(options) < 2:
+        await ctx.send("⚠️ الصيغة: `!choose خيار1 | خيار2` (خياران على الأقل).")
+        return
+    await ctx.send(f"🤖 اخترت لك: **{random.choice(options)}**")
+
+
+@bot.command(name="remind")
+async def remind(ctx, seconds: int, *, text: str):
+    if not 1 <= seconds <= 86400:
+        await ctx.send("⚠️ المدة يجب أن تكون بين 1 و 86400 ثانية (يوم).")
+        return
+    await ctx.send(f"⏰ سأذكّرك بعد {seconds} ثانية.")
+
+    async def _reminder():
+        await asyncio.sleep(seconds)
+        try:
+            await ctx.send(f"{ctx.author.mention} ⏰ تذكير: {text}")
+        except discord.HTTPException:
+            log.warning("Failed to send reminder to %s", ctx.author)
+
+    bot.loop.create_task(_reminder())
+
+
+@bot.command(name="botinfo")
+async def botinfo(ctx):
+    embed = discord.Embed(title="🤖 معلومات البوت", color=discord.Color.blurple())
+    embed.add_field(name="الاسم", value=bot.user.name, inline=True)
+    embed.add_field(name="السيرفرات", value=str(len(bot.guilds)), inline=True)
+    embed.add_field(name="زمن الاستجابة", value=f"{round(bot.latency * 1000)} ms", inline=True)
+    embed.add_field(name="discord.py", value=discord.__version__, inline=True)
+    await ctx.send(embed=embed)
+
 
 
 @bot.event
